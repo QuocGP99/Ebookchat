@@ -1,242 +1,321 @@
-import os
 import sys
+from PySide6.QtGui import QPalette, QColor
+from .toggle_switch import ToggleSwitch
+
+
+# ======================
+# THEME CSS
+# ======================
+DARK_CSS = """
+QWidget {
+    background-color: #0f172a;
+    color: #e2e8f0;
+    border: none;
+}
+QMainWindow {
+    background-color:#0f172a;
+}
+QFrame {
+    background: #1e293b;
+}
+QLabel {
+    color: #e2e8f0;
+}
+QListWidget {
+    background: #020617;
+    color: #e2e8f0;
+    border: none;
+}
+QLineEdit {
+    background: #020617;
+    color: #e2e8f0;
+    border-radius: 8px;
+    padding: 8px;
+    border: 1px solid #1e293b;
+}
+QToolBar {
+    background: #020617;
+    border-bottom: 1px solid #1e293b;
+}
+QStatusBar {
+    background: #020617;
+    color: #e2e8f0;
+    border-top: 1px solid #1e293b;
+}
+QPushButton {
+    background: #334155;
+    color: #e2e8f0;
+    border-radius: 6px;
+    padding: 6px 10px;
+}
+QPushButton:hover {
+    background: #475569;
+}
+"""
+
+LIGHT_CSS = """
+QWidget {
+    background-color: #f8fafc;
+    color: #1e293b;
+}
+QMainWindow {
+    background-color:#f8fafc;
+}
+QListWidget {
+    background: #ffffff;
+    color: #111827;
+}
+QLineEdit {
+    background: #ffffff;
+    border-radius: 8px;
+    padding: 8px;
+    border: 1px solid #d1d5db;
+}
+QToolBar {
+    background: #ffffff;
+    border-bottom: 1px solid #e5e7eb;
+}
+QStatusBar {
+    background: #ffffff;
+    color: #1f2933;
+    border-top: 1px solid #e5e7eb;
+}
+QPushButton {
+    background: #2563eb;
+    color: #ffffff;
+    border-radius: 6px;
+    padding: 6px 10px;
+}
+QPushButton:hover {
+    background: #1d4ed8;
+}
+"""
+
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget,
-    QVBoxLayout, QHBoxLayout,
-    QListWidget, QListWidgetItem,
-    QTextBrowser, QPushButton, QLabel,
-    QFileDialog, QMessageBox, QToolBar, QStatusBar
+    QApplication, QMainWindow, QWidget, QHBoxLayout,
+    QLabel, QToolBar, QStatusBar, QMessageBox,
+    QGridLayout, QFrame, QFileDialog, QCheckBox, QWidgetAction
 )
-from PySide6.QtGui import QAction, QFont, QPalette, QColor
-from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QPixmap
+from PySide6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve
 
 from ..models.book import Book
+from .left_sidebar import LeftSidebar
+
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("SVBook Reader")
+        self.setWindowTitle("EBook Reader")
         self.resize(1100, 700)
 
         self.books: list[Book] = []
-        self._dark_mode = False
+        self._current_anim = None
 
         self._setup_ui()
-        self._setup_actions()
-        self._apply_light_theme()
+        self._setup_toolbar()
 
-    # ------------------------------
-    # UI
+
     # ------------------------------
     def _setup_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
 
-        main_layout = QHBoxLayout(central)
-        main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(16)
+        layout = QHBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        # ===== Sidebar trái =====
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(12, 12, 12, 12)
-        left_layout.setSpacing(8)
+        # === sidebar
+        self.sidebar = LeftSidebar()
+        self.sidebar.bookSelected.connect(self.open_book_reader)
+        self.sidebar.requestAddBook.connect(self.add_book)
+        self.sidebar.requestDeleteBook.connect(self.delete_selected)
+        layout.addWidget(self.sidebar)
 
-        self.lbl_library = QLabel("Thư viện")
-        self.lbl_library.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        # ---- Vertical separator ----
+        line = QFrame()
+        line.setFrameShape(QFrame.VLine)
+        line.setStyleSheet("background:#e5e7eb; width:1px;")
+        layout.addWidget(line)
 
-        # --- Search box ---
-        from PySide6.QtWidgets import QLineEdit
-        self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Tìm sách…")
-        self.search_box.textChanged.connect(self.filter_books)
+        # === main content
+        content = QWidget()
+        layout_right = QHBoxLayout(content)
+        layout_right.setContentsMargins(0, 0, 0, 0)
 
-        self.book_list = QListWidget()
-        self.book_list.setAlternatingRowColors(True)
-        self.book_list.itemDoubleClicked.connect(self.on_book_double_clicked)
-        self.book_list.setStyleSheet("""
-            QListWidget {
-                border: none;
-                background-color: #f9fafb;
-                border-radius: 12px;
-                padding: 4px;
-            }
+        self.grid_container = QWidget()
+        self.grid = QGridLayout(self.grid_container)
+        self.grid.setSpacing(14)
+        self.grid.setContentsMargins(40, 40, 40, 40)
+
+        self.placeholder = QLabel("""
+            <h2>📚 EBook Reader</h2>
+            <p style='color:#6b7280'>Chọn “Thêm sách” hoặc click vào thư viện bên trái để bắt đầu đọc.</p>
         """)
+        self.placeholder.setAlignment(Qt.AlignCenter)
 
-        btn_row = QHBoxLayout()
-        self.btn_add_book = QPushButton("➕ Thêm sách")
-        self.btn_add_book.clicked.connect(self.add_book)
+        layout_right.addWidget(self.placeholder)
+        layout_right.addWidget(self.grid_container)
+        self.grid_container.hide()
 
-        self.btn_delete_book = QPushButton("🗑 Xóa sách")
-        self.btn_delete_book.clicked.connect(self.delete_selected)
+        layout.addWidget(content, 1)
 
-        btn_row.addWidget(self.btn_add_book)
-        btn_row.addWidget(self.btn_delete_book)
-
-        left_layout.addWidget(self.lbl_library)
-        left_layout.addWidget(self.search_box)
-        left_layout.addWidget(self.book_list, 1)
-        left_layout.addLayout(btn_row)
-
-        left_panel.setFixedWidth(260)
-        left_panel.setStyleSheet("""
-            QWidget {
-                background-color: #f3f4f6;
-                border-radius: 16px;
-            }
-        """)
-
-        # ===== Trang chủ placeholder =====
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(60, 60, 60, 60)
-
-        placeholder = QLabel("""
-        <h2>📚 SVBook Reader</h2>
-        <p style='color:#6b7280'>
-            Chọn sách bên trái để bắt đầu đọc.
-        </p>
-        """)
-        placeholder.setAlignment(Qt.AlignCenter)
-
-        right_layout.addStretch()
-        right_layout.addWidget(placeholder)
-        right_layout.addStretch()
-
-        main_layout.addWidget(left_panel)
-        main_layout.addWidget(right_panel, 1)
-
-        # ===== Toolbar =====
-        toolbar = QToolBar()
-        self.addToolBar(toolbar)
-
-        self.action_toggle_theme = QAction("Dark mode", self)
-        self.action_delete = QAction("Xóa sách", self)
-
-        toolbar.addAction(self.action_toggle_theme)
-        toolbar.addAction(self.action_delete)
-
+        # status
         status = QStatusBar()
         self.setStatusBar(status)
         status.showMessage("Sẵn sàng")
-   
-    # ------------------------------
-    # Actions
-    # ------------------------------
-    def _setup_actions(self):
-        self.action_toggle_theme.triggered.connect(self.toggle_theme)
-        self.action_delete.triggered.connect(self.delete_selected)
 
     # ------------------------------
-    # Thêm sách
+    def _setup_toolbar(self):
+        toolbar = QToolBar()
+        self.addToolBar(toolbar)
+
+        self.dark_switch = ToggleSwitch(self)
+        self.dark_switch.toggled.connect(self.on_toggle_switch)
+
+        switch_action = QWidgetAction(self)
+        switch_action.setDefaultWidget(self.dark_switch)
+        toolbar.addAction(switch_action)
+
+
+    def on_toggle_switch(self, checked: bool):
+        app = QApplication.instance()
+
+        if checked:
+            app.setStyleSheet(DARK_CSS)
+            self.statusBar().showMessage("Dark mode ON")
+        else:
+            app.setStyleSheet(LIGHT_CSS)
+            self.statusBar().showMessage("Dark mode OFF")
+
+        self.fade_theme()
+
+    # ------------------------------
+    # THEME
+    # ------------------------------
+    def fade_theme(self):
+        anim = QPropertyAnimation(self, b"windowOpacity")
+        anim.setDuration(400)
+        anim.setStartValue(0.5)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.InOutQuad)
+        anim.start()
+        self._current_anim = anim
+
+    def on_dark_switch_changed(self, state:int):
+        app = QApplication.instance()   # IMPORTANT
+
+        if state == Qt.Checked:
+            app.setStyleSheet(DARK_CSS)
+            self.statusBar().showMessage("Dark mode ON")
+        else:
+            app.setStyleSheet(LIGHT_CSS)
+            self.statusBar().showMessage("Dark mode OFF")
+
+        self.fade_theme()
+
+
+    # ------------------------------
+    # Add Book
     # ------------------------------
     def add_book(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Chọn file ebook",
-            "",
-            "Ebook (*.epub *.txt *.md *.pdf *.mobi *.azw3);;Tất cả các file (*.*)",
+        file, _ = QFileDialog.getOpenFileName(
+            self, "Chọn file ebook", "",
+            "Ebook (*.pdf *.txt *.epub *.mobi *.azw3)"
         )
-        if not file_path:
+        if not file:
             return
 
-        # check duplicates
         for b in self.books:
-            if b.path == file_path:
-                QMessageBox.information(self, "Đã tồn tại", "Sách này đã được thêm!")
+            if b.path == file:
+                QMessageBox.information(self, "Đã tồn tại",
+                                        "Sách này đã có trong thư viện!")
                 return
 
-        title = Path(file_path).stem
-        book = Book(title=title, path=file_path)
-        self.books.append(book)
+        title = Path(file).stem
+        book = Book(title=title, path=file)
 
-        item = QListWidgetItem(title)
-        item.setData(Qt.UserRole, book)
-        self.book_list.addItem(item)
+        self.books.append(book)
+        self.sidebar.add_book(book)
+        self.sidebar.add_recent(book)
+
+        if self.grid_container.isHidden():
+            self.placeholder.hide()
+            self.grid_container.show()
+
+        self.show_thumbnail(book)
 
         self.statusBar().showMessage(f"Đã thêm: {title}")
 
-        self.open_book_reader(book)
+    # ------------------------------
+    def show_thumbnail(self, book):
+        thumb = QLabel()
+        pix = self.make_thumbnail(book)
+
+        if pix.isNull():
+            pix = QPixmap("assets/default.png")
+            if pix.isNull():
+                pix = QPixmap(160, 220)
+                pix.fill(Qt.lightGray)
+
+        pix = pix.scaled(160, 220, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+        thumb.setPixmap(pix)
+        thumb.setFixedSize(160, 220)
+        thumb.setScaledContents(True)
+        thumb.setStyleSheet("""
+            QLabel {
+                border: 1px solid #e5e7eb;
+                border-radius: 10px;
+                background: #ffffff;
+            }
+        """)
+
+        count = self.grid.count()
+        col = count % 4
+        row = count // 4
+        self.grid.addWidget(thumb, row, col)
 
     # ------------------------------
-    # Double-click
-    # ------------------------------
-    def on_book_double_clicked(self, item):
-        book = item.data(Qt.UserRole)
-        if isinstance(book, Book):
-            self.open_book_reader(book)
+    def make_thumbnail(self, book):
+        from PySide6.QtPdf import QPdfDocument
+        try:
+            if book.path.lower().endswith(".pdf"):
+                doc = QPdfDocument(self)
+                if doc.load(book.path) == QPdfDocument.Status.NoError:
+                    img = doc.render(0, QSize(160, 220))
+                    pix = QPixmap.fromImage(img)
+                    if not pix.isNull():
+                        return pix
+            return QPixmap("assets/file-pdf.png")
+
+        except:
+            return QPixmap("assets/default.png")
 
     # ------------------------------
-    # Open ReaderPage
-    # ------------------------------
+    def delete_selected(self, item):
+        self.sidebar.remove_book(item)
+
     def open_book_reader(self, book: Book):
         from .reader_view import ReaderPage
         reader = ReaderPage(self, book)
         reader.show()
 
-        
-        print(">> OPENING:", book.path)
 
-    # ------------------------------
-    # Xóa sách
-    # ------------------------------
-    def delete_selected(self):
-        item = self.book_list.currentItem()
-        if not item:
-            return
-
-        row = self.book_list.row(item)
-        book = self.books[row]
-
-        self.book_list.takeItem(row)
-        del self.books[row]
-
-        self.statusBar().showMessage("Đã xóa sách")
-
-    # ------------------------------
-    # Theme
-    # ------------------------------
-    def _apply_light_theme(self):
-        pal = self.palette()
-        pal.setColor(QPalette.Window, QColor("#e5e7eb"))
-        pal.setColor(QPalette.Base, QColor("#f9fafb"))
-        pal.setColor(QPalette.Text, Qt.black)
-        pal.setColor(QPalette.WindowText, Qt.black)
-        self.setPalette(pal)
-
-    def _apply_dark_theme(self):
-        pal = self.palette()
-        pal.setColor(QPalette.Window, QColor("#020617"))
-        pal.setColor(QPalette.Base, QColor("#020617"))
-        pal.setColor(QPalette.Text, QColor("#e5e7eb"))
-        pal.setColor(QPalette.WindowText, QColor("#e5e7eb"))
-        self.setPalette(pal)
-
-    def toggle_theme(self):
-        self._dark_mode = not self._dark_mode
-        if self._dark_mode:
-            self._apply_dark_theme()
-        else:
-            self._apply_light_theme()
-
-    def filter_books(self, text):
-        for i in range(self.book_list.count()):
-            item = self.book_list.item(i)
-            item.setHidden(text.lower() not in item.text().lower())
-
-
-# ==============================
-# Entry point
-# ==============================
+# ======================
+# RUN APP (IMPORTANT ORDER)
+# ======================
 def run_app():
     app = QApplication(sys.argv)
-    app.setApplicationName("EBook Reader")
 
-    window = MainWindow()
-    window.show()
+    # set initial theme FIRST
+    app.setStyleSheet(LIGHT_CSS)
 
+    win = MainWindow()
+    win.setWindowOpacity(0.98)
+    win.show()
     sys.exit(app.exec())
