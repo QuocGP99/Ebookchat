@@ -17,11 +17,12 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QCheckBox,
     QWidgetAction,
+    QMenu,
 )
-from PySide6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve, QEvent
 from .toggle_switch import ToggleSwitch
 from ..services.cover_service import get_cover
-from ..services.reward_service import reward_service
+from ..services.goal_service import goal_service
 from ..models.book import Book
 from .left_sidebar import LeftSidebar
 from ..services.metadata_service import get_book_metadata
@@ -116,6 +117,68 @@ QPushButton:hover {
 """
 
 
+class BookCard(QWidget):
+    def __init__(self, book, parent_window):
+        super().__init__()
+        self.book = book
+        self.main_window = parent_window
+        self.setFixedSize(160, 260)
+        self.setCursor(Qt.PointingHandCursor)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(5)
+
+        # Ảnh bìa
+        self.lbl_thumb = QLabel()
+        self.lbl_thumb.setFixedSize(150, 210)
+        self.lbl_thumb.setStyleSheet("border-radius: 6px; background: #e5e7eb;")
+        self.lbl_thumb.setAlignment(Qt.AlignCenter)
+        self.lbl_thumb.setScaledContents(True)
+
+        # Tên sách
+        self.lbl_title = QLabel(book.title)
+        self.lbl_title.setWordWrap(True)
+        self.lbl_title.setAlignment(Qt.AlignCenter)
+        self.lbl_title.setStyleSheet(
+            "font-weight: bold; font-size: 11px; color: #334155; border: none; background: transparent;"
+        )
+
+        layout.addWidget(self.lbl_thumb)
+        layout.addWidget(self.lbl_title)
+
+        self.load_image()
+
+    def load_image(self):
+        pix = self.main_window.get_book_pixmap(self.book)
+        self.lbl_thumb.setPixmap(pix)
+
+    def enterEvent(self, event):
+        self.setStyleSheet("background-color: #e2e8f0; border-radius: 8px;")
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.setStyleSheet("background-color: transparent;")
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.main_window.open_book_reader(self.book)
+
+    # --- MỚI: SỰ KIỆN CHUỘT PHẢI ĐỂ XÓA ---
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+
+        delete_action = QAction("🗑️ Xóa sách này", self)
+        # Gọi hàm xóa mới trong MainWindow
+        delete_action.triggered.connect(
+            lambda: self.main_window.delete_book_direct(self.book)
+        )
+
+        menu.addAction(delete_action)
+        menu.exec(event.globalPos())
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -143,7 +206,16 @@ class MainWindow(QMainWindow):
         self.sidebar.bookSelected.connect(self.open_book_reader)
         self.sidebar.requestAddBook.connect(self.add_book)
         self.sidebar.requestDeleteBook.connect(self.delete_selected)
+        self.sidebar.searchChanged.connect(self.filter_books)
         layout.addWidget(self.sidebar)
+
+        # CẤU HÌNH GALLERY CANH ĐỀU TRÁI TRÊN
+        self.grid_container = QWidget()
+        self.grid = QGridLayout(self.grid_container)
+        self.grid.setSpacing(15)
+        self.grid.setContentsMargins(20, 20, 20, 20)
+        # Quan trọng: Đẩy các item dồn lên trên và sang trái
+        self.grid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
         # ---- Vertical separator ----
         line = QFrame()
@@ -204,9 +276,67 @@ class MainWindow(QMainWindow):
         self.update_user_stats()
 
     def update_user_stats(self):
-        lvl = reward_service.get_level()
-        exp = reward_service.get_exp()
-        self.lbl_user_stats.setText(f"🎖️ Level {lvl} | XP: {exp}")
+        # HIỂN THỊ MỤC TIÊU
+        read, goal = goal_service.get_progress()
+        percent = int((read / goal) * 100) if goal > 0 else 100
+
+        color = "#22c55e" if read >= goal else "#f59e0b"
+        self.lbl_user_stats.setText(f"🎯 Hôm nay: {read}/{goal} phút ({percent}%)")
+        self.lbl_user_stats.setStyleSheet(
+            f"font-weight: bold; color: {color}; padding-left: 10px;"
+        )
+
+    # --- TÍNH NĂNG SEARCH ---
+    def filter_books(self, text):
+        text = text.lower().strip()
+
+        # 1. Lọc trong Sidebar
+        for i in range(self.sidebar.book_list.count()):
+            item = self.sidebar.book_list.item(i)
+            book = item.data(Qt.UserRole)
+            # Tìm theo tên HOẶC tác giả
+            is_match = text in book.title.lower() or text in book.author.lower()
+            self.sidebar.book_list.setRowHidden(i, not is_match)
+
+        # 2. Lọc trong Gallery (Cải tiến)
+        for i in range(self.grid.count()):
+            widget = self.grid.itemAt(i).widget()
+            # Kiểm tra xem widget có phải là BookCard và có thuộc tính book không
+            if widget and hasattr(widget, "book"):
+                book = widget.book
+                # Logic tìm kiếm giống hệt Sidebar
+                is_match = text in book.title.lower() or text in book.author.lower()
+                widget.setVisible(is_match)
+
+    def delete_book_direct(self, book):
+        """Xóa sách khi nhận được yêu cầu từ BookCard (Gallery)"""
+
+        # Hộp thoại xác nhận (Tùy chọn, nếu muốn xóa nhanh thì bỏ qua)
+        confirm = QMessageBox.question(
+            self,
+            "Xác nhận xóa",
+            f"Bạn có chắc muốn xóa sách '{book.title}' không?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm == QMessageBox.No:
+            return
+
+        # 1. Xóa khỏi danh sách dữ liệu
+        if book in self.books:
+            self.books.remove(book)
+
+        # 2. Xóa khỏi Sidebar (Phải tìm item tương ứng)
+        # Duyệt qua các dòng trong sidebar để tìm sách cần xóa
+        for i in range(self.sidebar.book_list.count()):
+            item = self.sidebar.book_list.item(i)
+            if item.data(Qt.UserRole) == book:
+                self.sidebar.book_list.takeItem(i)
+                break
+
+        # 3. Cập nhật lại Gallery
+        self.refresh_gallery()
+
+        self.statusBar().showMessage(f"Đã xóa: {book.title}")
 
     def on_toggle_switch(self, checked: bool):
         app = QApplication.instance()
@@ -273,11 +403,6 @@ class MainWindow(QMainWindow):
         ]:  # Nếu trong file có title chuẩn thì dùng, ko thì dùng tên file
             book.title = meta["title"]
 
-        # 2. Lấy Cover (Code cũ của bạn)
-        extracted_cover = get_cover(book.path, book.ext)
-        if extracted_cover:
-            book.cover = extracted_cover
-
         # --- MỚI: Trích xuất cover ngay khi thêm sách ---
         # Nếu là PDF thì render sau, nếu là epub thì extract file ảnh
         extracted_cover = get_cover(book.path, book.ext)
@@ -301,43 +426,13 @@ class MainWindow(QMainWindow):
         """Tạo một widget thẻ sách (Card) gồm Ảnh + Tên"""
 
         # Container cho 1 cuốn sách
-        card = QWidget()
-        card.setFixedSize(160, 260)  # Kích thước cố định cho đều
-
-        # Layout dọc: Trên là ảnh, dưới là tên
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(5)
-
-        # --- Phần Ảnh bìa ---
-        lbl_thumb = QLabel()
-        lbl_thumb.setFixedSize(160, 220)
-        lbl_thumb.setStyleSheet("border-radius: 8px; background: #e5e7eb;")
-        lbl_thumb.setAlignment(Qt.AlignCenter)
-
-        # Lấy pixmap
-        pix = self.get_book_pixmap(book)
-        lbl_thumb.setPixmap(pix)
-        lbl_thumb.setScaledContents(True)  # Co giãn ảnh cho vừa khung
-
-        # --- Phần Tên sách ---
-        lbl_title = QLabel(book.title)
-        lbl_title.setWordWrap(True)  # Tự xuống dòng nếu tên dài
-        lbl_title.setAlignment(Qt.AlignCenter)
-        lbl_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #334155;")
-
-        # Thêm sự kiện Click vào Card để mở sách
-        # (Dùng eventFilter hoặc Button vô hình đè lên, ở đây dùng cách gán mousePressEvent đơn giản)
-        card.mousePressEvent = lambda event: self.open_book_reader(book)
-
-        layout.addWidget(lbl_thumb)
-        layout.addWidget(lbl_title)
-
-        # Tính toán vị trí trong Grid (4 cột)
+        card = BookCard(book, self)
         count = self.grid.count()
-        col = count % 4
-        row = count // 4
+        col = count % 5
+        row = count // 5
         self.grid.addWidget(card, row, col)
+
+        self.grid.setColumnStretch(5, 1)
 
     def get_book_pixmap(self, book):
         """Ưu tiên: Ảnh cover extract -> Render PDF -> Icon mặc định"""
@@ -426,7 +521,31 @@ class MainWindow(QMainWindow):
 
     # ------------------------------
     def delete_selected(self, item):
+        # 1. Lấy object sách từ item
+        book_to_delete = item.data(Qt.UserRole)
+
+        # 2. Xóa khỏi danh sách dữ liệu thực (self.books)
+        if book_to_delete in self.books:
+            self.books.remove(book_to_delete)
+
+        # 3. Xóa khỏi giao diện Sidebar
         self.sidebar.remove_book(item)
+
+        # 4. Cập nhật lại Gallery
+        self.refresh_gallery()
+
+        self.statusBar().showMessage(f"Đã xóa sách: {book_to_delete.title}")
+
+    def refresh_gallery(self):
+        # Xóa toàn bộ card cũ
+        for i in reversed(range(self.grid.count())):
+            widget = self.grid.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+
+        # Vẽ lại từ danh sách self.books mới
+        for book in self.books:
+            self.add_book_to_gallery(book)
 
     def open_book_reader(self, book: Book):
         from .reader_view import ReaderPage

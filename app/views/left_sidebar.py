@@ -8,8 +8,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLineEdit,
     QListWidgetItem,
+    QMenu,
 )
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QAction
 from PySide6.QtCore import Qt, Signal
 
 
@@ -18,6 +19,7 @@ class LeftSidebar(QWidget):
     bookSelected = Signal(object)
     requestAddBook = Signal()
     requestDeleteBook = Signal(object)
+    searchChanged = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -34,8 +36,9 @@ class LeftSidebar(QWidget):
 
         # SEARCH BOX
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Tìm kiếm…")
+        self.search_box.setPlaceholderText("Tìm kiếm sách…")
         self.search_box.setClearButtonEnabled(True)
+        self.search_box.textChanged.connect(self.searchChanged.emit)
 
         icon_path = os.path.join(
             os.path.dirname(__file__), "../assets/icons/search.png"
@@ -65,6 +68,10 @@ class LeftSidebar(QWidget):
         # ------ main list ------
         self.book_list = QListWidget()
         self.book_list.itemDoubleClicked.connect(self.on_double_click)
+
+        # Thêm menu chuột phải để xóa
+        self.book_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.book_list.customContextMenuRequested.connect(self.show_context_menu)
         layout.addWidget(self.book_list, 1)
 
         # ------ RECENT header ------
@@ -88,6 +95,22 @@ class LeftSidebar(QWidget):
         """
         )
         layout.addWidget(self.btn_add)
+
+    # === HÀM HIỂN THỊ MENU CHUỘT PHẢI ===
+    def show_context_menu(self, pos):
+        item = self.book_list.itemAt(pos)
+        if not item:
+            return  # Nếu click vào vùng trắng thì bỏ qua
+
+        menu = QMenu(self)
+
+        # Tạo action Xóa
+        delete_action = QAction("🗑️ Xóa sách này", self)
+        delete_action.triggered.connect(lambda: self.requestDeleteBook.emit(item))
+        menu.addAction(delete_action)
+
+        # Hiển thị menu tại vị trí chuột
+        menu.exec(self.book_list.mapToGlobal(pos))
 
     # ======================================================
     def add_book(self, book):

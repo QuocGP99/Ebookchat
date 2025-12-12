@@ -37,24 +37,18 @@ def read_epub(path: str) -> str:
 
             # Ưu tiên lấy body, nếu không thì lấy hết
             body = soup.find("body")
-            if body:
-                # Xử lý ảnh trong nội dung (nếu cần thiết sau này)
-                content_parts.append(str(body))
-            else:
-                content_parts.append(str(soup))
+            content_str = str(body) if body else str(soup)
+            file_id = item.file_name
+            wrapped_content = (
+                f'<div id="{file_id}" class="chapter-container">{content_str}</div>'
+            )
+
+            content_parts.append(wrapped_content)
 
         if not content_parts:
-            # Debug: In ra các loại file tìm thấy để biết tại sao lỗi
-            found = [f"{i.media_type}" for i in book.get_items()]
-            debug_info = ", ".join(found[:10])
-            return f"""
-            <div style='padding:20px; color:red'>
-                <h3>Không tìm thấy nội dung văn bản!</h3>
-                <p>File này có cấu trúc lạ. Các định dạng tìm thấy: {debug_info}...</p>
-            </div>
-            """
+            return "<h3 style='color:red'>Không tìm thấy nội dung văn bản.</h3>"
 
         return "<hr>".join(content_parts)
 
     except Exception as e:
-        return f"<h3 style='color:red'>Lỗi nghiêm trọng khi đọc file: {str(e)}</h3>"
+        return f"<h3 style='color:red'>Lỗi đọc file: {str(e)}</h3>"
