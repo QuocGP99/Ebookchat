@@ -7,123 +7,200 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QMdiSubWindow,
     QTextBrowser,
+    QSplitter,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QColorDialog,
+    QMenu,
 )
+from PySide6.QtGui import QAction, QTextCursor, QTextCharFormat, QColor, QIcon
 from PySide6.QtCore import Qt, QTimer
-from ..services.pdf_service import create_pdf_view
+
 from ..controllers.book_controller import load_book
 from ..services.reward_service import reward_service
+import fitz  # PyMuPDF cho TOC PDF
 
 
 class ReaderPage(QMdiSubWindow):
-    """
-    Cửa sổ đọc PDF dạng MDI:
-    - Hiển thị số trang
-    - Next / Prev = nhảy tới đầu trang tiếp theo
-    - Zoom in / out = scale lại ảnh trang
-    """
-
     def __init__(self, main_window, book):
         super().__init__(main_window)
-
         self.book = book
         self.main_window = main_window
+        self.setWindowTitle(f"{book.title} - {book.author}")
+        self.resize(1200, 800)
 
-        # state
-        self.current_page = 0
-        self.zoom_value = 1.0
-        self.page_labels: list[QLabel] = []
-        self.original_pixmaps = []
+        # === MAIN LAYOUT (SPLITTER) ===
+        # Chia đôi màn hình: Trái (TOC) - Phải (Nội dung)
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.setWidget(self.splitter)
 
-        self.setWindowTitle(book.title)
-        self.resize(1000, 700)
+        # --- LEFT: TABLE OF CONTENT (TOC) ---
+        self.toc_tree = QTreeWidget()
+        self.toc_tree.setHeaderLabel("Mục lục")
+        self.toc_tree.setFixedWidth(250)
+        self.toc_tree.itemClicked.connect(self.on_toc_clicked)
+        self.toc_tree.hide()  # Ẩn mặc định, hiện nút toggle sau
+        self.splitter.addWidget(self.toc_tree)
 
-        # ================== UI ROOT ==================
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(8)
+        # --- RIGHT: CONTENT AREA ---
+        content_widget = QWidget()
+        self.layout = QVBoxLayout(content_widget)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.splitter.addWidget(content_widget)
+        self.splitter.setStretchFactor(1, 4)  # Bên phải rộng gấp 4 lần
 
-        # ---------------- Toolbar ----------------
-        toolbar = QHBoxLayout()
+        # --- TOOLBAR ---
+        self._setup_toolbar()
 
-        # Nút Back
-        btn_back = QPushButton("← Trở lại")
-        btn_back.clicked.connect(self.close)
-        toolbar.addWidget(btn_back)
+        # --- LOAD BOOK ---
+        self.content_data = load_book(book)
+        self.is_pdf = book.ext == ".pdf"
 
-        # Biến kiểm tra có phải PDF không
-        is_pdf = book.ext == ".pdf"
+        if callable(self.content_data):  # PDF Wrapper
+            self.pdf_scroll = self.content_data(self, book.path)
+            self.layout.addWidget(self.pdf_scroll)
+            # Load TOC PDF
+            self.load_pdf_toc()
+            # Logic PDF cũ (Back/Next) bạn giữ nguyên ở đây...
 
-        # Các nút điều hướng chỉ hiện nếu là PDF
-        if is_pdf:
-            self.btn_prev = QPushButton("◀ Prev")
-            self.btn_prev.clicked.connect(self.prev_page)
-            toolbar.addWidget(self.btn_prev)
-
-            self.btn_next = QPushButton("Next ▶")
-            self.btn_next.clicked.connect(self.next_page)
-            toolbar.addWidget(self.btn_next)
-
-        toolbar.addStretch()
-
-        # --- Label hiển thị phần thưởng ---
-        self.lbl_reward = QLabel("⏳ Đang đọc...")
-        self.lbl_reward.setStyleSheet("color: #16a34a; font-weight: bold;")
-        toolbar.addWidget(self.lbl_reward)
-
-        toolbar.addStretch()
-
-        # Nút Zoom (Chỉ hiện nếu là PDF)
-        if is_pdf:
-            self.lbl_page = QLabel("Page ? / ?")
-            toolbar.addWidget(self.lbl_page)
-
-            self.btn_zoom_out = QPushButton("🔍 -")
-            self.btn_zoom_out.clicked.connect(self.zoom_out)
-            toolbar.addWidget(self.btn_zoom_out)
-
-            self.btn_zoom_in = QPushButton("🔍 +")
-            self.btn_zoom_in.clicked.connect(self.zoom_in)
-            toolbar.addWidget(self.btn_zoom_in)
-
-            self.lbl_zoom = QLabel("100%")
-            toolbar.addWidget(self.lbl_zoom)
-
-        layout.addLayout(toolbar)
-
-        # ---------------- CONTENT LOAD ----------------
-        # Dùng book_controller để lấy nội dung
-        content_data = load_book(book)
-
-        if callable(content_data):
-            # === TRƯỜNG HỢP PDF ===
-            # content_data là hàm create_pdf_view trả về QScrollArea
-            self.pdf_scroll = content_data(self, book.path)
-            layout.addWidget(self.pdf_scroll, 1)
-
-            # Logic PDF cũ
-            self._collect_pages()
-            self.update_ui()
-
-        else:
-            # === TRƯỜNG HỢP TEXT / EPUB ===
-            # content_data là chuỗi HTML
+        else:  # TEXT (Epub, Mobi, Txt)
             self.text_viewer = QTextBrowser()
-            self.text_viewer.setHtml(content_data)
+            self.text_viewer.setHtml(self.content_data)
             self.text_viewer.setOpenExternalLinks(False)
             self.text_viewer.setStyleSheet(
-                "font-size: 16px; padding: 10px; background: white;"
+                "padding: 20px; font-size: 16px; line-height: 1.6;"
             )
-            layout.addWidget(self.text_viewer, 1)
+            self.layout.addWidget(self.text_viewer)
 
-        self.setWidget(widget)
-        self.show()
+            # Context Menu cho Highlight
+            self.text_viewer.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.text_viewer.customContextMenuRequested.connect(self.show_context_menu)
 
-        # ---------------- GAMIFICATION TIMER ----------------
-        # 60 giây (60000 ms) thưởng 1 lần
+            # Auto Generate TOC cho HTML (Quét thẻ H1, H2)
+            # (Phần này nâng cao, tạm thời để trống hoặc quét regex)
+
+        # --- GAMIFICATION ---
         self.read_timer = QTimer(self)
         self.read_timer.timeout.connect(self.on_reading_reward)
         self.read_timer.start(60000)
+
+    def _setup_toolbar(self):
+        tb = QHBoxLayout()
+        self.layout.addLayout(tb)
+
+        # Nút hiện/ẩn mục lục
+        btn_toc = QPushButton("📑 Mục lục")
+        btn_toc.clicked.connect(
+            lambda: self.toc_tree.setVisible(not self.toc_tree.isVisible())
+        )
+        tb.addWidget(btn_toc)
+
+        # Nút Bookmark (Lưu vị trí)
+        btn_bookmark = QPushButton("🔖 Lưu Bookmark")
+        btn_bookmark.clicked.connect(self.save_bookmark)
+        tb.addWidget(btn_bookmark)
+
+        if self.book.ext not in [".pdf"]:
+            # Nút Highlight nhanh (Màu vàng)
+            btn_hl = QPushButton("🖊️ Highlight")
+            btn_hl.clicked.connect(self.highlight_selection)
+            tb.addWidget(btn_hl)
+
+        tb.addStretch()
+
+        # Reward Label
+        self.lbl_reward = QLabel("⏳ Reading...")
+        tb.addWidget(self.lbl_reward)
+
+    # tính năng mục lục PDF
+    def load_pdf_toc(self):
+        if not self.is_pdf:
+            return
+        try:
+            doc = fitz.open(self.book.path)
+            toc = doc.get_toc()  # [[lvl, title, page], ...]
+
+            items = {}  # Map level để tạo cây
+            # Root ảo
+            items[0] = self.toc_tree.invisibleRootItem()
+
+            for level, title, page in toc:
+                parent = items.get(level - 1, items[0])
+                item = QTreeWidgetItem(parent, [title])
+                item.setData(0, Qt.UserRole, page)  # Lưu số trang vào data
+                items[level] = item
+
+            doc.close()
+        except Exception as e:
+            print("Lỗi TOC:", e)
+
+    def on_toc_clicked(self, item, col):
+        page_num = item.data(0, Qt.UserRole)
+        if self.is_pdf and page_num:
+            # Gọi hàm nhảy trang của PDF logic cũ
+            # (Bạn cần cập nhật hàm _scroll_to_page tương ứng)
+            self.current_page = page_num - 1
+            if hasattr(self, "_scroll_to_current_page"):
+                self._scroll_to_current_page()
+                self.update_ui()
+
+    # ==============================
+    # 2. TÍNH NĂNG HIGHLIGHT (TEXT)
+    # ==============================
+    def show_context_menu(self, pos):
+        menu = QMenu()
+        hl_action = QAction("Tô đậm (Vàng)", self)
+        hl_action.triggered.connect(self.highlight_selection)
+        menu.addAction(hl_action)
+        menu.exec(self.text_viewer.mapToGlobal(pos))
+
+    def highlight_selection(self):
+        if self.is_pdf:
+            return
+
+        cursor = self.text_viewer.textCursor()
+        if not cursor.hasSelection():
+            return
+
+        # Tạo định dạng highlight
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor("#fef08a"))  # Màu vàng nhạt
+        fmt.setForeground(Qt.black)
+
+        cursor.mergeCharFormat(fmt)
+
+    # ==============================
+    # 3. TÍNH NĂNG BOOKMARK
+    # ==============================
+    def save_bookmark(self):
+        # Đây là tính năng lưu trạng thái đơn giản
+        # Trong thực tế bạn cần lưu vào JSON (giống reward_service)
+        import json
+
+        data = {}
+        try:
+            with open("bookmarks.json", "r") as f:
+                data = json.load(f)
+        except:
+            pass
+
+        # Lưu trang hiện tại (PDF) hoặc scroll (Text)
+        val = (
+            self.current_page
+            if self.is_pdf
+            else self.text_viewer.verticalScrollBar().value()
+        )
+
+        data[self.book.path] = val
+
+        with open("bookmarks.json", "w") as f:
+            json.dump(data, f)
+        self.lbl_reward.setText("✅ Đã lưu vị trí!")
+
+    def on_reading_reward(self):
+        # (Logic cũ của bạn giữ nguyên)
+        reward_service.add_exp(10)
+        self.lbl_reward.setText(f"💎 +10 XP")
 
     # ======================================================
     # Thu thập danh sách các QLabel trang + lưu pixmap gốc

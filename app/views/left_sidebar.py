@@ -1,10 +1,17 @@
 import os
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QListWidget,
-    QPushButton, QHBoxLayout, QLineEdit, QListWidgetItem
+    QWidget,
+    QVBoxLayout,
+    QLabel,
+    QListWidget,
+    QPushButton,
+    QHBoxLayout,
+    QLineEdit,
+    QListWidgetItem,
 )
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt, Signal
+
 
 class LeftSidebar(QWidget):
     # signals
@@ -17,7 +24,7 @@ class LeftSidebar(QWidget):
         self.setFixedWidth(260)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12,12,12,12)
+        layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
         # -------- LIBRARY header --------
@@ -30,10 +37,13 @@ class LeftSidebar(QWidget):
         self.search_box.setPlaceholderText("Tìm kiếm…")
         self.search_box.setClearButtonEnabled(True)
 
-        icon_path = os.path.join(os.path.dirname(__file__), "../assets/icons/search.png")
+        icon_path = os.path.join(
+            os.path.dirname(__file__), "../assets/icons/search.png"
+        )
         self.search_box.addAction(QIcon(icon_path), QLineEdit.TrailingPosition)
 
-        self.search_box.setStyleSheet("""
+        self.search_box.setStyleSheet(
+            """
             QLineEdit {
                 border:1px solid #d1d5db;
                 border-radius: 8px;
@@ -43,7 +53,8 @@ class LeftSidebar(QWidget):
             QLineEdit:focus{
                 border:1px solid #3b82f6;
             }
-        """)
+        """
+        )
 
         layout.addWidget(self.search_box)
 
@@ -68,20 +79,43 @@ class LeftSidebar(QWidget):
         # ------ bottom add button --------
         self.btn_add = QPushButton("➕ Thêm sách")
         self.btn_add.clicked.connect(self.requestAddBook.emit)
-        self.btn_add.setStyleSheet("""
+        self.btn_add.setStyleSheet(
+            """
             background-color:#22c55e;
             color:white;padding:10px;
             border-radius:8px;
             font-weight:600;
-        """)
+        """
+        )
         layout.addWidget(self.btn_add)
 
     # ======================================================
     def add_book(self, book):
-        icon = QIcon("assets/book.png")
-        item = QListWidgetItem(book.title)
-        item.setData(Qt.UserRole, book)
+        # Tạo widget custom để hiển thị 2 dòng (Title + Author)
+        item = QListWidgetItem()
         self.book_list.addItem(item)
+
+        # Widget container
+        widget = QWidget()
+        vbox = QVBoxLayout(widget)
+        vbox.setContentsMargins(5, 5, 5, 5)
+        vbox.setSpacing(2)
+
+        # Title
+        lbl_title = QLabel(book.title)
+        lbl_title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        vbox.addWidget(lbl_title)
+
+        # Author
+        lbl_author = QLabel(book.author)
+        lbl_author.setStyleSheet("color: #64748b; font-size: 12px;")
+        vbox.addWidget(lbl_author)
+
+        item.setSizeHint(widget.sizeHint())
+        self.book_list.setItemWidget(item, widget)
+
+        # Lưu dữ liệu vào item để dùng khi click
+        item.setData(Qt.UserRole, book)
 
     def add_recent(self, book):
         item = QListWidgetItem(book.title)

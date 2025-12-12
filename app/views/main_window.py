@@ -24,6 +24,7 @@ from ..services.cover_service import get_cover
 from ..services.reward_service import reward_service
 from ..models.book import Book
 from .left_sidebar import LeftSidebar
+from ..services.metadata_service import get_book_metadata
 
 
 # ======================
@@ -263,6 +264,19 @@ class MainWindow(QMainWindow):
 
         title = Path(file).stem
         book = Book(title=title, path=file)
+
+        # 1. Lấy Metadata (Author/Title chuẩn)
+        meta = get_book_metadata(file, book.ext)
+        book.author = meta["author"]
+        if meta[
+            "title"
+        ]:  # Nếu trong file có title chuẩn thì dùng, ko thì dùng tên file
+            book.title = meta["title"]
+
+        # 2. Lấy Cover (Code cũ của bạn)
+        extracted_cover = get_cover(book.path, book.ext)
+        if extracted_cover:
+            book.cover = extracted_cover
 
         # --- MỚI: Trích xuất cover ngay khi thêm sách ---
         # Nếu là PDF thì render sau, nếu là epub thì extract file ảnh
