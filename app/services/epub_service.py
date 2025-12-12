@@ -1,41 +1,60 @@
-from ebooklib import epub
+import warnings
+from ebooklib import epub, ITEM_DOCUMENT
 from bs4 import BeautifulSoup
+
+# Tắt cảnh báo phiền phức
+warnings.filterwarnings("ignore")
 
 
 def read_epub(path: str) -> str:
     """
-    Đọc nội dung EPUB, ưu tiên lấy nội dung trong <body>,
-    fallback lấy cả soup nếu file epub không chuẩn.
-    Trả về HTML đã ghép.
+    Đọc nội dung EPUB (Phiên bản quét sâu)
     """
-
-    # ===== chặn lỗi đọc file =====
     try:
-        eb = epub.read_epub(path)
+        book = epub.read_epub(path)
+        content_parts = []
+
+        # Cách 1: Duyệt qua tất cả items được đánh dấu là DOCUMENT
+        # ITEM_DOCUMENT bao gồm HTML và XHTML
+        items = list(book.get_items_of_type(ITEM_DOCUMENT))
+
+        # Cách 2: Nếu Cách 1 không thấy gì, duyệt thủ công qua media_type
+        if not items:
+            for item in book.get_items():
+                if item.media_type in ["application/xhtml+xml", "text/html"]:
+                    items.append(item)
+
+        for item in items:
+            # Lấy nội dung raw
+            raw_content = item.get_content()
+
+            # Parse HTML
+            soup = BeautifulSoup(raw_content, "html.parser")
+
+            # Xóa bớt các script/style thừa để sạch giao diện
+            for s in soup(["script", "style", "title", "meta"]):
+                s.decompose()
+
+            # Ưu tiên lấy body, nếu không thì lấy hết
+            body = soup.find("body")
+            if body:
+                # Xử lý ảnh trong nội dung (nếu cần thiết sau này)
+                content_parts.append(str(body))
+            else:
+                content_parts.append(str(soup))
+
+        if not content_parts:
+            # Debug: In ra các loại file tìm thấy để biết tại sao lỗi
+            found = [f"{i.media_type}" for i in book.get_items()]
+            debug_info = ", ".join(found[:10])
+            return f"""
+            <div style='padding:20px; color:red'>
+                <h3>Không tìm thấy nội dung văn bản!</h3>
+                <p>File này có cấu trúc lạ. Các định dạng tìm thấy: {debug_info}...</p>
+            </div>
+            """
+
+        return "<hr>".join(content_parts)
+
     except Exception as e:
-        return f"<h3>Lỗi khi đọc EPUB:<br>{str(e)}</h3>"
-
-    content_parts = []
-
-    # ===== duyệt items =====
-    try:
-        for item in eb.get_items():
-            if item.get_type() == epub.EpubHtml:
-                soup = BeautifulSoup(item.get_content(), "html.parser")
-
-                # có body thì lấy body
-                body = soup.find("body")
-                if body:
-                    content_parts.append(str(body))
-                else:
-                    # fallback
-                    content_parts.append(str(soup))
-
-    except Exception as e:
-        return f"<h3>Lỗi khi xử lý nội dung EPUB:<br>{str(e)}</h3>"
-
-    # ===== kết quả =====
-    if not content_parts:
-        return "<h3>Không đọc được nội dung EPUB</h3>"
-
-    return "<hr>".join(content_parts)
+        return f"<h3 style='color:red'>Lỗi nghiêm trọng khi đọc file: {str(e)}</h3>"

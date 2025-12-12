@@ -1,6 +1,29 @@
 import sys
-from PySide6.QtGui import QPalette, QColor
+import os
+from pathlib import Path
+from PySide6.QtGui import QPalette, QColor, QAction, QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QHBoxLayout,
+    QVBoxLayout,
+    QLabel,
+    QToolBar,
+    QStatusBar,
+    QMessageBox,
+    QGridLayout,
+    QFrame,
+    QFileDialog,
+    QCheckBox,
+    QWidgetAction,
+)
+from PySide6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve
 from .toggle_switch import ToggleSwitch
+from ..services.cover_service import get_cover
+from ..services.reward_service import reward_service
+from ..models.book import Book
+from .left_sidebar import LeftSidebar
 
 
 # ======================
@@ -91,20 +114,6 @@ QPushButton:hover {
 }
 """
 
-from pathlib import Path
-
-from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QHBoxLayout,
-    QLabel, QToolBar, QStatusBar, QMessageBox,
-    QGridLayout, QFrame, QFileDialog, QCheckBox, QWidgetAction
-)
-from PySide6.QtGui import QAction, QPixmap
-from PySide6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve
-
-from ..models.book import Book
-from .left_sidebar import LeftSidebar
-
-
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -118,7 +127,6 @@ class MainWindow(QMainWindow):
 
         self._setup_ui()
         self._setup_toolbar()
-
 
     # ------------------------------
     def _setup_ui(self):
@@ -152,10 +160,12 @@ class MainWindow(QMainWindow):
         self.grid.setSpacing(14)
         self.grid.setContentsMargins(40, 40, 40, 40)
 
-        self.placeholder = QLabel("""
+        self.placeholder = QLabel(
+            """
             <h2>📚 EBook Reader</h2>
             <p style='color:#6b7280'>Chọn “Thêm sách” hoặc click vào thư viện bên trái để bắt đầu đọc.</p>
-        """)
+        """
+        )
         self.placeholder.setAlignment(Qt.AlignCenter)
 
         layout_right.addWidget(self.placeholder)
@@ -181,6 +191,21 @@ class MainWindow(QMainWindow):
         switch_action.setDefaultWidget(self.dark_switch)
         toolbar.addAction(switch_action)
 
+        toolbar.addSeparator()
+
+        self.lbl_user_stats = QLabel()
+        self.lbl_user_stats.setStyleSheet(
+            "font-weight: bold; color: #2563eb; padding-left: 10px;"
+        )
+        toolbar.addWidget(self.lbl_user_stats)
+
+        # Gọi cập nhật lần đầu
+        self.update_user_stats()
+
+    def update_user_stats(self):
+        lvl = reward_service.get_level()
+        exp = reward_service.get_exp()
+        self.lbl_user_stats.setText(f"🎖️ Level {lvl} | XP: {exp}")
 
     def on_toggle_switch(self, checked: bool):
         app = QApplication.instance()
@@ -206,8 +231,8 @@ class MainWindow(QMainWindow):
         anim.start()
         self._current_anim = anim
 
-    def on_dark_switch_changed(self, state:int):
-        app = QApplication.instance()   # IMPORTANT
+    def on_dark_switch_changed(self, state: int):
+        app = QApplication.instance()  # IMPORTANT
 
         if state == Qt.Checked:
             app.setStyleSheet(DARK_CSS)
@@ -218,38 +243,124 @@ class MainWindow(QMainWindow):
 
         self.fade_theme()
 
-
     # ------------------------------
     # Add Book
     # ------------------------------
     def add_book(self):
         file, _ = QFileDialog.getOpenFileName(
-            self, "Chọn file ebook", "",
-            "Ebook (*.pdf *.txt *.epub *.mobi *.azw3)"
+            self, "Chọn file ebook", "", "Ebook (*.pdf *.txt *.epub *.mobi *.azw3)"
         )
         if not file:
             return
 
+        # Kiểm tra trùng lặp
         for b in self.books:
             if b.path == file:
-                QMessageBox.information(self, "Đã tồn tại",
-                                        "Sách này đã có trong thư viện!")
+                QMessageBox.information(
+                    self, "Đã tồn tại", "Sách này đã có trong thư viện!"
+                )
                 return
 
         title = Path(file).stem
         book = Book(title=title, path=file)
 
+        # --- MỚI: Trích xuất cover ngay khi thêm sách ---
+        # Nếu là PDF thì render sau, nếu là epub thì extract file ảnh
+        extracted_cover = get_cover(book.path, book.ext)
+        if extracted_cover:
+            book.cover = extracted_cover
+
         self.books.append(book)
         self.sidebar.add_book(book)
-        self.sidebar.add_recent(book)
 
+        # Hiển thị Gallery nếu đang ẩn
         if self.grid_container.isHidden():
             self.placeholder.hide()
             self.grid_container.show()
 
-        self.show_thumbnail(book)
+        # Hiển thị sách lên lưới (Gallery)
+        self.add_book_to_gallery(book)
 
         self.statusBar().showMessage(f"Đã thêm: {title}")
+
+    def add_book_to_gallery(self, book):
+        """Tạo một widget thẻ sách (Card) gồm Ảnh + Tên"""
+
+        # Container cho 1 cuốn sách
+        card = QWidget()
+        card.setFixedSize(160, 260)  # Kích thước cố định cho đều
+
+        # Layout dọc: Trên là ảnh, dưới là tên
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+
+        # --- Phần Ảnh bìa ---
+        lbl_thumb = QLabel()
+        lbl_thumb.setFixedSize(160, 220)
+        lbl_thumb.setStyleSheet("border-radius: 8px; background: #e5e7eb;")
+        lbl_thumb.setAlignment(Qt.AlignCenter)
+
+        # Lấy pixmap
+        pix = self.get_book_pixmap(book)
+        lbl_thumb.setPixmap(pix)
+        lbl_thumb.setScaledContents(True)  # Co giãn ảnh cho vừa khung
+
+        # --- Phần Tên sách ---
+        lbl_title = QLabel(book.title)
+        lbl_title.setWordWrap(True)  # Tự xuống dòng nếu tên dài
+        lbl_title.setAlignment(Qt.AlignCenter)
+        lbl_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #334155;")
+
+        # Thêm sự kiện Click vào Card để mở sách
+        # (Dùng eventFilter hoặc Button vô hình đè lên, ở đây dùng cách gán mousePressEvent đơn giản)
+        card.mousePressEvent = lambda event: self.open_book_reader(book)
+
+        layout.addWidget(lbl_thumb)
+        layout.addWidget(lbl_title)
+
+        # Tính toán vị trí trong Grid (4 cột)
+        count = self.grid.count()
+        col = count % 4
+        row = count // 4
+        self.grid.addWidget(card, row, col)
+
+    def get_book_pixmap(self, book):
+        """Ưu tiên: Ảnh cover extract -> Render PDF -> Icon mặc định"""
+
+        # 1. Nếu đã có cover path (từ EPUB/Mobi)
+        if book.cover and os.path.exists(book.cover):
+            return QPixmap(book.cover)
+
+        # 2. Nếu là PDF (Render trang đầu)
+        if book.ext == ".pdf":
+            from PySide6.QtPdf import QPdfDocument
+
+            try:
+                doc = QPdfDocument(self)
+                doc.load(book.path)
+                if doc.status() == QPdfDocument.Status.Ready:
+                    img = doc.render(0, QSize(300, 400))  # Render chất lượng tốt chút
+                    return QPixmap.fromImage(img)
+            except:
+                pass
+
+        # 3. Fallback: Icon mặc định theo đuôi file (Bạn có thể thêm icon txt.png, epub.png vào assets)
+        # Ở đây mình tạo Pixmap màu chứa tên đuôi file
+        pix = QPixmap(160, 220)
+        pix.fill(QColor("#cbd5e1"))  # Màu xám sáng
+
+        # Vẽ chữ lên ảnh placeholder (VD: "EPUB")
+        from PySide6.QtGui import QPainter, QFont
+
+        p = QPainter(pix)
+        p.setPen(QColor("#475569"))
+        font = QFont("Arial", 20, QFont.Bold)
+        p.setFont(font)
+        p.drawText(pix.rect(), Qt.AlignCenter, book.ext.upper())
+        p.end()
+
+        return pix
 
     # ------------------------------
     def show_thumbnail(self, book):
@@ -267,13 +378,15 @@ class MainWindow(QMainWindow):
         thumb.setPixmap(pix)
         thumb.setFixedSize(160, 220)
         thumb.setScaledContents(True)
-        thumb.setStyleSheet("""
+        thumb.setStyleSheet(
+            """
             QLabel {
                 border: 1px solid #e5e7eb;
                 border-radius: 10px;
                 background: #ffffff;
             }
-        """)
+        """
+        )
 
         count = self.grid.count()
         col = count % 4
@@ -283,6 +396,7 @@ class MainWindow(QMainWindow):
     # ------------------------------
     def make_thumbnail(self, book):
         from PySide6.QtPdf import QPdfDocument
+
         try:
             if book.path.lower().endswith(".pdf"):
                 doc = QPdfDocument(self)
@@ -302,6 +416,7 @@ class MainWindow(QMainWindow):
 
     def open_book_reader(self, book: Book):
         from .reader_view import ReaderPage
+
         reader = ReaderPage(self, book)
         reader.show()
 
