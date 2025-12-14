@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
     QFrame,
     QApplication,
+    QMenu,
 )
 from PySide6.QtGui import (
     QAction,
@@ -185,6 +186,7 @@ class ReaderPage(QMdiSubWindow):
         self.total_pages = 0
         self.pdf_doc = None
         self.zoom_level = 1.0
+        self.page_scroll_offsets = {}  # Lưu vị trí scroll của từng trang PDF
 
         self.is_dragging = False
         self.drag_start_pos = QPoint()
@@ -225,6 +227,7 @@ class ReaderPage(QMdiSubWindow):
         # OVERLAY
         self.flip_overlay = PageFlipOverlay(self.content_area)
         self.flip_overlay.hide()
+        # mini preview removed
 
         # FOOTER
         self._setup_footer()
@@ -233,6 +236,9 @@ class ReaderPage(QMdiSubWindow):
             self.setup_pdf_viewer()
         else:
             self.setup_epub_viewer()
+
+        # Tải bookmark nếu tồn tại
+        self.load_bookmark()
 
         self.read_timer = QTimer(self)
         self.read_timer.timeout.connect(self.on_reading_timer)
@@ -250,9 +256,9 @@ class ReaderPage(QMdiSubWindow):
         )
         tb.addWidget(btn_toc)
 
-        btn_mark = QPushButton("🔖 Bookmark")
-        btn_mark.clicked.connect(self.save_bookmark)
-        tb.addWidget(btn_mark)
+        self.btn_mark = QPushButton("🔖 Bookmark")
+        self.btn_mark.clicked.connect(self.toggle_bookmark)
+        tb.addWidget(self.btn_mark)
 
         if not self.is_pdf:
             colors = [("Vàng", "#fef08a"), ("Xanh", "#bbf7d0"), ("Hồng", "#fbcfe8")]
@@ -346,6 +352,10 @@ class ReaderPage(QMdiSubWindow):
         if self.book.ext == ".epub":
             self.load_epub_toc()
         self.update_footer_info()
+        # Cập nhật nút bookmark khi viewer khởi tạo
+        if hasattr(self, "btn_mark"):
+            self.update_bookmark_button()
+        # mini-preview removed
 
     # --- HELPERS: LẤY ẢNH VÀ VÙNG TRANG ---
     def get_page_geometry(self):
@@ -435,6 +445,29 @@ class ReaderPage(QMdiSubWindow):
 
     # --- DRAG EVENTS ---
     def eventFilter(self, source, event):
+        # (preview removed) skip resize-specific preview handling
+        # Xử lý zoom bằng Scroll chuột
+        if event.type() == QEvent.Wheel:
+            if event.angleDelta().y() > 0:
+                # Scroll lên = Zoom in
+                self.change_zoom(0.1)
+            else:
+                # Scroll xuống = Zoom out
+                self.change_zoom(-0.1)
+            return True
+
+        # Xử lý double-click để reset zoom
+        if event.type() == QEvent.MouseButtonDblClick:
+            if event.button() == Qt.LeftButton:
+                # Reset zoom về cỡ tiêu chuẩn
+                self.zoom_level = 1.0
+                if self.is_pdf:
+                    self.page_scroll_offsets[self.current_page_index] = 0
+                    self.render_pdf_page(self.current_page_index)
+                else:
+                    self.text_viewer.setZoomFactor(1.0)
+                return True
+
         if event.type() == QEvent.MouseButtonPress:
             if event.button() == Qt.LeftButton:
                 self.is_dragging = True
@@ -444,45 +477,82 @@ class ReaderPage(QMdiSubWindow):
 
         elif event.type() == QEvent.MouseMove:
             if self.is_dragging:
-                diff = event.pos().x() - self.drag_start_pos.x()
-                if self.drag_direction == 0 and abs(diff) > 20:
-                    curr_pix, rect, bg_color = self.get_page_geometry()
+                diff_y = event.pos().y() - self.drag_start_pos.y()
 
-                    if diff < 0:  # Next
-                        self.drag_direction = 1
-                        self.drag_next_pix = self.get_next_page_pixmap_hidden(1)
-                        if self.drag_next_pix:
-                            self.flip_overlay.start_drag(
-                                curr_pix,
-                                self.drag_next_pix,
-                                1,
-                                rect,
-                                bg_color,
-                                self.finish_next_page,
-                            )
-                    else:  # Prev
-                        self.drag_direction = -1
-                        self.drag_prev_pix = self.get_next_page_pixmap_hidden(-1)
-                        if self.drag_prev_pix:
-                            self.flip_overlay.start_drag(
-                                curr_pix,
-                                self.drag_prev_pix,
-                                -1,
-                                rect,
-                                bg_color,
-                                self.finish_prev_page,
-                            )
+                if self.is_pdf:
+                    # PDF: Lật trang dựa trên drag X, cuộn dựa trên drag Y (tọa độ tuyệt đối)
+                    diff_x = event.pos().x() - self.drag_start_pos.x()
 
-                if self.drag_direction != 0:
-                    w = self.content_area.width()
-                    prog = abs(diff) / w
-                    self.flip_overlay.set_progress_manual(prog)
-                    return True
+                    # Ưu tiên drag Y để scroll nội dung nếu zoom in
+                    if abs(diff_y) > 20 and self.zoom_level > 1.0:
+                        # Scroll dựa trên vị trí Y tuyệt đối (không trượt)
+                        page_h = self.content_area.height()
+                        max_scroll = int(page_h * (self.zoom_level - 1.0))
+
+                        # Tính vị trí scroll từ tọa độ Y hiện tại
+                        position = (event.pos().y() / page_h) * max_scroll
+                        position = max(0, min(max_scroll, int(position)))
+
+                        self.page_scroll_offsets[self.current_page_index] = position
+                        self.render_pdf_page(self.current_page_index)
+                        return True
+                    elif abs(diff_x) > 20:
+                        # Lật trang
+                        if self.drag_direction == 0:
+                            curr_pix, rect, bg_color = self.get_page_geometry()
+
+                            if diff_x < 0:  # Next
+                                self.drag_direction = 1
+                                self.drag_next_pix = self.get_next_page_pixmap_hidden(1)
+                                if self.drag_next_pix:
+                                    self.flip_overlay.start_drag(
+                                        curr_pix,
+                                        self.drag_next_pix,
+                                        1,
+                                        rect,
+                                        bg_color,
+                                        self.finish_next_page,
+                                    )
+                            else:  # Prev
+                                self.drag_direction = -1
+                                self.drag_prev_pix = self.get_next_page_pixmap_hidden(
+                                    -1
+                                )
+                                if self.drag_prev_pix:
+                                    self.flip_overlay.start_drag(
+                                        curr_pix,
+                                        self.drag_prev_pix,
+                                        -1,
+                                        rect,
+                                        bg_color,
+                                        self.finish_prev_page,
+                                    )
+
+                        if self.drag_direction != 0:
+                            w = self.content_area.width()
+                            prog = abs(diff_x) / w
+                            self.flip_overlay.set_progress_manual(prog)
+                            return True
+                else:
+                    # EPUB: Cuộn đến vị trí dựa trên Y
+                    if abs(diff_y) > 10:
+                        scrollbar = self.text_viewer.verticalScrollBar()
+                        content_height = self.content_area.height()
+                        max_scroll = scrollbar.maximum()
+
+                        # Tính vị trí scroll dựa trên tọa độ Y
+                        # Y = 0 là top, Y = content_height là bottom
+                        position = (event.pos().y() / content_height) * max_scroll
+                        position = max(0, min(max_scroll, int(position)))
+
+                        scrollbar.setValue(position)
+                        self.update_footer_info()
+                        return True
 
         elif event.type() == QEvent.MouseButtonRelease:
             if self.is_dragging:
                 self.is_dragging = False
-                if self.drag_direction != 0:
+                if self.is_pdf and self.drag_direction != 0:
                     current_prog = self.flip_overlay.flip_progress
                     if current_prog > 0.3:
                         self.flip_overlay.anim.setStartValue(current_prog)
@@ -507,13 +577,29 @@ class ReaderPage(QMdiSubWindow):
         pix = page.get_pixmap(matrix=mat)
         fmt = QImage.Format_RGBA8888 if pix.alpha else QImage.Format_RGB888
         img = QImage(pix.samples, pix.width, pix.height, pix.stride, fmt).copy()
+
+        # Áp dụng scroll offset nếu zoom in
+        if self.zoom_level > 1.0:
+            offset = self.page_scroll_offsets.get(page_index, 0)
+            if offset > 0:
+                # Cắt phần ảnh từ vị trí offset
+                img = img.copy(0, offset, img.width(), img.height() - offset)
+
         self.pdf_label.setPixmap(QPixmap.fromImage(img))
         self.update_footer_info()
+        # Cập nhật trạng thái bookmark khi thay đổi trang
+        if hasattr(self, "btn_mark"):
+            self.update_bookmark_button()
 
     def update_footer_info(self):
         if self.is_pdf:
+            percent = (
+                int((self.current_page_index + 1) / self.total_pages * 100)
+                if self.total_pages > 0
+                else 0
+            )
             self.lbl_page_info.setText(
-                f"Trang {self.current_page_index + 1} / {self.total_pages}"
+                f"Trang {self.current_page_index + 1} / {self.total_pages} ({percent}%)"
             )
             self.btn_prev.setEnabled(self.current_page_index > 0)
             self.btn_next.setEnabled(self.current_page_index < self.total_pages - 1)
@@ -521,9 +607,12 @@ class ReaderPage(QMdiSubWindow):
             sb = self.text_viewer.verticalScrollBar()
             if sb.maximum() > 0:
                 percent = int((sb.value() / sb.maximum()) * 100)
-                self.lbl_page_info.setText(f"Đã đọc {percent}%")
+                # Ước tính số trang dựa trên scroll position
+                self.lbl_page_info.setText(
+                    f"Đã đọc {percent}% | Trang ≈ {max(1, int((sb.value() / sb.maximum()) * self.total_pages) + 1)}"
+                )
             else:
-                self.lbl_page_info.setText("Trang 1")
+                self.lbl_page_info.setText("Trang 1 | Đã đọc 0%")
 
     def change_zoom(self, delta):
         self.zoom_level += delta
@@ -532,12 +621,17 @@ class ReaderPage(QMdiSubWindow):
         if self.zoom_level > 3.0:
             self.zoom_level = 3.0
         if self.is_pdf:
+            # Reset scroll offset khi zoom lại
+            if self.zoom_level <= 1.0:
+                self.page_scroll_offsets[self.current_page_index] = 0
             self.render_pdf_page(self.current_page_index)
         else:
             if delta > 0:
                 self.text_viewer.zoomIn(1)
             else:
                 self.text_viewer.zoomOut(1)
+
+    # preview was removed per user request
 
     def load_pdf_toc(self):
         if not self.pdf_doc:
@@ -613,10 +707,11 @@ class ReaderPage(QMdiSubWindow):
 
     def save_bookmark(self):
         import json
+        import os
 
         data = {}
         try:
-            with open("bookmarks.json", "r") as f:
+            with open("bookmarks.json", "r", encoding="utf-8") as f:
                 data = json.load(f)
         except:
             pass
@@ -626,6 +721,94 @@ class ReaderPage(QMdiSubWindow):
             else self.text_viewer.verticalScrollBar().value()
         )
         data[self.book.path] = val
-        with open("bookmarks.json", "w") as f:
-            json.dump(data, f)
+        with open("bookmarks.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
         self.lbl_reward.setText("✅ Đã lưu vị trí!")
+
+    def get_bookmarks_data(self):
+        """Lấy dữ liệu bookmark từ file"""
+        import json
+        import os
+
+        bookmarks_file = "bookmarks.json"
+        if os.path.exists(bookmarks_file):
+            try:
+                with open(bookmarks_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
+
+    def save_bookmarks_data(self, data):
+        """Lưu dữ liệu bookmark vào file"""
+        import json
+
+        bookmarks_file = "bookmarks.json"
+        try:
+            with open(bookmarks_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            self.lbl_reward.setText(f"❌ Lỗi lưu bookmark: {e}")
+
+    def get_current_position(self):
+        """Lấy vị trí đọc hiện tại"""
+        if self.is_pdf:
+            return self.current_page_index
+        else:
+            return self.text_viewer.verticalScrollBar().value()
+
+    def is_bookmarked(self):
+        """Kiểm tra sách có được bookmark không"""
+        data = self.get_bookmarks_data()
+        return self.book.path in data
+
+    def toggle_bookmark(self):
+        """Bật/Tắt bookmark"""
+        data = self.get_bookmarks_data()
+
+        if self.is_bookmarked():
+            # Xóa bookmark
+            del data[self.book.path]
+            self.lbl_reward.setText("📌 Đã xóa bookmark!")
+        else:
+            # Thêm bookmark
+            position = self.get_current_position()
+            data[self.book.path] = position
+            self.lbl_reward.setText("✅ Đã lưu bookmark!")
+
+        self.save_bookmarks_data(data)
+        self.update_bookmark_button()
+
+    def load_bookmark(self):
+        """Tải vị trí đọc từ bookmark"""
+        data = self.get_bookmarks_data()
+
+        if self.book.path not in data:
+            return
+
+        position = data[self.book.path]
+
+        try:
+            if self.is_pdf:
+                # Load trang PDF đã lưu
+                if 0 <= position < self.total_pages:
+                    self.render_pdf_page(position)
+            else:
+                # Load vị trí scroll của EPUB
+                scrollbar = self.text_viewer.verticalScrollBar()
+                scrollbar.setValue(position)
+                self.update_footer_info()
+        except Exception as e:
+            print(f"Lỗi tải bookmark: {e}")
+
+    def update_bookmark_button(self):
+        """Cập nhật trạng thái hiển thị của nút bookmark"""
+        if hasattr(self, "btn_mark"):
+            if self.is_bookmarked():
+                self.btn_mark.setStyleSheet(
+                    "background-color: #f59e0b; color: white; font-weight: bold; border-radius: 4px;"
+                )
+            else:
+                self.btn_mark.setStyleSheet(
+                    "background-color: #6b7280; color: white; font-weight: bold; border-radius: 4px;"
+                )
